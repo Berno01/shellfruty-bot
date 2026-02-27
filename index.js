@@ -4,6 +4,7 @@ const {
   makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
+  Browsers,
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
 const qrcode = require("qrcode-terminal");
@@ -199,11 +200,21 @@ async function llamarIA(sender, mensajeCliente) {
 }
 
 async function connectToWhatsApp() {
-  const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
+  let state, saveCreds;
+  try {
+    ({ state, saveCreds } = await useMultiFileAuthState("auth_info_baileys"));
+  } catch (err) {
+    console.error("❌ Error leyendo sesión:", err.message);
+    setTimeout(() => connectToWhatsApp(), 10000);
+    return;
+  }
 
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: "silent" }),
+    browser: Browsers.ubuntu("Chrome"),
+    connectTimeoutMs: 30000,
+    defaultQueryTimeoutMs: 60000,
   });
 
   sock.ev.on("connection.update", (update) => {
@@ -391,6 +402,12 @@ server.listen(PORT, async () => {
   console.log(`🌐 HTTP healthcheck server escuchando en puerto ${PORT}`);
   // Cargamos el catálogo UNA sola vez al inicio
   await cargarCatalogo();
-  // Iniciamos el bot de WhatsApp una vez que el server está arriba.
-  connectToWhatsApp();
+  // Iniciamos el bot de WhatsApp — envuelto en try/catch para que
+  // un error de arranque no mate el proceso y cause restart loop en Koyeb.
+  try {
+    connectToWhatsApp();
+  } catch (err) {
+    console.error("❌ Error arrancando WhatsApp bot:", err.message);
+    setTimeout(() => connectToWhatsApp(), 10000);
+  }
 });
