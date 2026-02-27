@@ -189,6 +189,7 @@ Si el menú tiene reglas vacías (reglas: []), se puede agregar directo sin preg
 3. Si permite_combinar es true, puede combinar.
 4. SIEMPRE informa el precio total actualizado cuando cambies algo.
 5. MONEDA: Bs.
+6. CANTIDAD EXACTA OBLIGATORIA: Si una categoría tiene "gratis": N, el cliente DEBE elegir EXACTAMENTE N ingredientes. Si elige menos, NO avances. Pregúntale que complete los restantes: puede elegir otro diferente o repetir uno ya elegido (doble). Ejemplo: gratis: 3 y elige 2 → "Te falta 1 topping, ¿cuál más querés o repetimos alguno en doble?".
 
 === FLUJO OBLIGATORIO ===
 1. Cliente pide un menú → revisa sus reglas inmediatamente.
@@ -314,7 +315,8 @@ async function connectToWhatsApp() {
     const sender = msg.key.remoteJid;
     const text =
       msg.message.conversation || msg.message.extendedTextMessage?.text;
-    if (!text) return;
+    const esUbicacion = !!msg.message.locationMessage;
+    if (!text && !esUbicacion) return;
 
     // --- Bienvenida y control de sesión ---
     if (!sesiones[sender]) {
@@ -323,6 +325,19 @@ async function connectToWhatsApp() {
         carrito: { items: [] },
         saludado: false,
       };
+    }
+
+    // --- Pedido ya finalizado: ignorar mensajes ---
+    if (sesiones[sender].pedidoFinalizado) return;
+
+    // --- Esperando ubicación post-pedido ---
+    if (sesiones[sender].esperandoUbicacion) {
+      sesiones[sender].esperandoUbicacion = false;
+      sesiones[sender].pedidoFinalizado = true;
+      await sock.sendMessage(sender, {
+        text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
+      });
+      return;
     }
 
     if (!sesiones[sender].saludado) {
@@ -338,10 +353,9 @@ async function connectToWhatsApp() {
         "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
       try {
         await sock.sendMessage(sender, { text: bienvenida });
-        // Enviar las dos imágenes del menú
+        // Enviar imagen del menú sin caption
         await sock.sendMessage(sender, {
           image: { url: "./menu_imgs/menu1.jpg" },
-          caption: "Menú 1",
         });
       } catch (e) {
         console.error("Error enviando bienvenida o imágenes:", e.message);
@@ -406,10 +420,10 @@ async function connectToWhatsApp() {
             if (dataJson.finalizado === true) {
               const exito = await enviarPedidoALaravel(sender);
               if (exito) {
+                sesiones[sender].esperandoUbicacion = true;
                 await sock.sendMessage(sender, {
-                  text: "¡Listo Case! Ya mandé tu pedido a cocina. Ahora necesitamos El comprobante del pago en QR y te lo enviamos. 😉",
+                  text: "¡Perfecto Case! Tu pedido ya está en cocina 🍓\n\nUna cosita más: mandanos tu *ubicación en tiempo real* para la entrega 📍",
                 });
-                delete sesiones[sender];
               }
             }
           } catch (e) {
