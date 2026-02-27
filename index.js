@@ -38,6 +38,7 @@ const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
 const sesiones = {};
 let CATALOGO_CACHE = null;
+let MENUS_ARRAY = []; // Array normalizado de menús para búsquedas internas
 // --- Buffers y temporizadores para agrupar mensajes por usuario ---
 const buffers = {}; // { sender: [mensajes] }
 const timers = {}; // { sender: timeoutId }
@@ -56,7 +57,19 @@ async function cargarCatalogo() {
     // Catálogo en línea: usamos la ruta /menu sobre la base configurada arriba.
     const res = await axios.get(`${API_BASE_URL}/menu`);
     CATALOGO_CACHE = res.data;
-    console.log("✅ Catálogo cargado de Laravel con éxito");
+    // Normalizar el array de menús sin importar la estructura del API
+    if (Array.isArray(CATALOGO_CACHE)) {
+      MENUS_ARRAY = CATALOGO_CACHE;
+    } else if (Array.isArray(CATALOGO_CACHE.menus)) {
+      MENUS_ARRAY = CATALOGO_CACHE.menus;
+    } else if (Array.isArray(CATALOGO_CACHE.data)) {
+      MENUS_ARRAY = CATALOGO_CACHE.data;
+    } else {
+      // Buscar el primer array en el objeto como último recurso
+      const primerArray = Object.values(CATALOGO_CACHE).find((v) => Array.isArray(v));
+      MENUS_ARRAY = primerArray || [];
+    }
+    console.log(`✅ Catálogo cargado de Laravel con éxito — ${MENUS_ARRAY.length} menús disponibles`);
   } catch (error) {
     console.error("❌ Error cargando catálogo:", error.message);
   }
@@ -77,7 +90,7 @@ async function enviarPedidoALaravel(sender) {
   const detallesVenta = session.carrito.items
     .map((item) => {
       const idMenu = item.id_menu || item.id;
-      const menuInfo = CATALOGO_CACHE.menus.find((m) => m.id === idMenu);
+      const menuInfo = MENUS_ARRAY.find((m) => m.id === idMenu);
 
       if (!menuInfo) return null;
 
@@ -151,12 +164,12 @@ async function llamarIA(sender, mensajeCliente) {
     try {
       const genModel = genAI.getGenerativeModel({
         model: nombreModelo,
-        systemInstruction: `Eres el recepcionista virtual de Shellfruty una tienda de Fresas con Crema en Tarija. 
+        systemInstruction: `Eres el recepcionista de Shellfruty una tienda de Fresas con Crema en Tarija. 
                 Tu trato es amable pero no cargoso y Tarijeño pero nada exagerado LO mas importante es no hablar mucho, ser directo con el pedido del cliente, no escribir tanto texto ni relleno, directo a tomar el pedido y explicar bien cuando notes que no estan haciendo bien el pedido.
 
                 REGLAS CRÍTICAS DE FIEL CUMPLIMIENTO:
                 1. CATÁLOGO REAL: ${JSON.stringify(CATALOGO_CACHE)}
-                2. PROHIBIDO HACER EXCEPCIONES. Si un ingrediente o categoría no está en el JSON de reglas del menú elegido, NO EXISTE. No lo ofrezcas.
+                2. PROHIBIDO HACER EXCEPCIONES. Si un ingrediente o categoría no está en el JSON de reglas del menú elegido, NO EXISTE. No lo ofrezcas. Es importante que obligues al cliente a selegir las categorias del vaso, no tomes el pedido suelto a menos que no tenga categorias asignadas o no tenga nada seleccionado en la categoria, pero los que si, obligalos a elegir
                 
                 3. SIEMPRE incluye el estado COMPLETO del carrito en el JSON de [DATA].
                 4. MULTI-PEDIDO: Si piden varios productos o el mismo varias veces, agrúpalos en el array de items con su respectiva 'cantidad'.
@@ -164,7 +177,7 @@ async function llamarIA(sender, mensajeCliente) {
                 6. MONEDA: Usa "Bs.".
                 7. INGREDIENTES PREMIUM: Si "extra" > 0, suma el monto al total e infórmalo.
                 8. LÍMITES ESTRICTOS: Si "permite_combinar" es false y "precio_extra_regla" es 0, el cliente NO puede elegir más de la cantidad "gratis".
-                9. Trato: Amable, chapaco, directo y CERO flexible con las reglas.
+                9. Trato: Amable, chapaco, directo y CERO flexible con las reglas. obliga a elegir las categorias en caso de que el menu tenga disponibles en la categoria
                 10. En caso de que un menu tenga mas de un ingrediente por elegir en una categoria es obligatorio que arme su personalizacion, en caso de solo contar con un solo ingrediente en una categoria entonces no es necesario hacerle elegir o seleccionar explicitamente, se sobreentiende
                 REGLAS DE FORMATO (ESTRICTAS):
                 1. NUNCA uses bloques de código markdown (como \\\`json).
@@ -214,7 +227,7 @@ async function connectToWhatsApp() {
   try {
     const { version } = await fetchLatestBaileysVersion();
     waVersion = version;
-    console.log(`📲 Usando WhatsApp Web v${version.join('.')}`);
+    console.log(`📲 Usando WhatsApp Web v${version.join(".")}`);
   } catch {
     waVersion = [2, 3000, 1015901307]; // fallback conocido
     console.warn("⚠️ No se pudo obtener versión WA, usando fallback.");
@@ -239,22 +252,30 @@ async function connectToWhatsApp() {
     if (connection === "close") {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-      console.log(`🔌 Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
+      console.log(
+        `🔌 Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`,
+      );
 
       if (statusCode === DisconnectReason.multideviceMismatch) {
         // Sesión incompatible: borrar credenciales y reconectar con QR fresco
-        console.log("⚠️  Multidevice mismatch — limpiando sesión y reconectando en 15 segundos...");
+        console.log(
+          "⚠️  Multidevice mismatch — limpiando sesión y reconectando en 15 segundos...",
+        );
         const fs = require("fs");
         const path = require("path");
         const authDir = path.join(__dirname, "auth_info_baileys");
         if (fs.existsSync(authDir)) {
-          fs.readdirSync(authDir).forEach(f => fs.unlinkSync(path.join(authDir, f)));
+          fs.readdirSync(authDir).forEach((f) =>
+            fs.unlinkSync(path.join(authDir, f)),
+          );
         }
         setTimeout(() => connectToWhatsApp(), 15000);
       } else if (statusCode === 405) {
         // WhatsApp bloqueó la IP temporalmente por demasiados intentos
         // Esperar 2 minutos antes de reintentar
-        console.log("🚫 WhatsApp rechazó la conexión (405). Esperando 2 minutos antes de reintentar...");
+        console.log(
+          "🚫 WhatsApp rechazó la conexión (405). Esperando 2 minutos antes de reintentar...",
+        );
         setTimeout(() => connectToWhatsApp(), 120000);
       } else if (shouldReconnect) {
         setTimeout(() => connectToWhatsApp(), 5000);
