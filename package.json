@@ -1,0 +1,22 @@
+{
+  "name": "bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "axios": "^1.13.4",
+    "dotenv": "^16.4.5",
+    "pino": "^10.3.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
