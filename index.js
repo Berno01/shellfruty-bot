@@ -200,7 +200,6 @@ async function llamarIA(sender, mensajeCliente) {
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info_baileys");
-  await cargarCatalogo();
 
   const sock = makeWASocket({
     auth: state,
@@ -209,12 +208,33 @@ async function connectToWhatsApp() {
 
   sock.ev.on("connection.update", (update) => {
     const { connection, lastDisconnect, qr } = update;
-    if (qr) qrcode.generate(qr, { small: true });
+    if (qr) {
+      console.log("📱 Escanea el QR con tu WhatsApp:");
+      qrcode.generate(qr, { small: true });
+    }
     if (connection === "close") {
-      const shouldReconnect =
-        (lastDisconnect.error instanceof Boom)?.output?.statusCode !==
-        DisconnectReason.loggedOut;
-      if (shouldReconnect) connectToWhatsApp();
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`🔌 Conexión cerrada. Código: ${statusCode}. Reconectar: ${shouldReconnect}`);
+
+      if (statusCode === DisconnectReason.multideviceMismatch) {
+        // Sesión incompatible: borrar credenciales y reconectar con QR fresco
+        console.log("⚠️  Multidevice mismatch — limpiando sesión y reconectando en 15 segundos...");
+        const fs = require("fs");
+        const path = require("path");
+        const authDir = path.join(__dirname, "auth_info_baileys");
+        if (fs.existsSync(authDir)) {
+          fs.readdirSync(authDir).forEach(f => fs.unlinkSync(path.join(authDir, f)));
+        }
+        setTimeout(() => connectToWhatsApp(), 15000);
+      } else if (statusCode === 405) {
+        // WhatsApp bloqueó la IP temporalmente por demasiados intentos
+        // Esperar 2 minutos antes de reintentar
+        console.log("🚫 WhatsApp rechazó la conexión (405). Esperando 2 minutos antes de reintentar...");
+        setTimeout(() => connectToWhatsApp(), 120000);
+      } else if (shouldReconnect) {
+        setTimeout(() => connectToWhatsApp(), 5000);
+      }
     } else if (connection === "open") {
       console.log("🚀 Shellfruty Bot Conectado - Sucursal " + SUCURSAL_ID);
     }
@@ -359,8 +379,18 @@ const server = http.createServer((req, res) => {
   }
 });
 
-server.listen(PORT, () => {
+// Capturar errores no manejados para ver qué está crasheando
+process.on("unhandledRejection", (reason) => {
+  console.error("❌ UNHANDLED REJECTION:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("❌ UNCAUGHT EXCEPTION:", err);
+});
+
+server.listen(PORT, async () => {
   console.log(`🌐 HTTP healthcheck server escuchando en puerto ${PORT}`);
+  // Cargamos el catálogo UNA sola vez al inicio
+  await cargarCatalogo();
   // Iniciamos el bot de WhatsApp una vez que el server está arriba.
   connectToWhatsApp();
 });
