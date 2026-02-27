@@ -12,7 +12,8 @@ const qrcode = require("qrcode-terminal");
 const pino = require("pino");
 const axios = require("axios");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
-const http = require("http"); // Pequeño server HTTP para healthcheck
+const http = require("http");
+const { Server } = require("socket.io"); // WebSocket para notificar al frontend
 
 // --- CONFIGURACIÓN ---
 
@@ -66,10 +67,14 @@ async function cargarCatalogo() {
       MENUS_ARRAY = CATALOGO_CACHE.data;
     } else {
       // Buscar el primer array en el objeto como último recurso
-      const primerArray = Object.values(CATALOGO_CACHE).find((v) => Array.isArray(v));
+      const primerArray = Object.values(CATALOGO_CACHE).find((v) =>
+        Array.isArray(v),
+      );
       MENUS_ARRAY = primerArray || [];
     }
-    console.log(`✅ Catálogo cargado de Laravel con éxito — ${MENUS_ARRAY.length} menús disponibles`);
+    console.log(
+      `✅ Catálogo cargado de Laravel con éxito — ${MENUS_ARRAY.length} menús disponibles`,
+    );
   } catch (error) {
     console.error("❌ Error cargando catálogo:", error.message);
   }
@@ -141,9 +146,17 @@ async function enviarPedidoALaravel(sender) {
       JSON.stringify(payload, null, 2),
     );
     const res = await axios.post(`${API_BASE_URL}/venta`, payload);
-    console.log(
-      `✅ Pedido guardado en Laravel. ID Venta: ${res.data.id_venta || "OK"}`,
-    );
+    const idVenta = res.data.id_venta || null;
+    console.log(`✅ Pedido guardado en Laravel. ID Venta: ${idVenta || "OK"}`);
+    // Notificar al frontend en tiempo real
+    io.emit("nueva_venta", {
+      origen: "bot",
+      id_venta: idVenta,
+      total: totalVenta,
+      fecha: payload.fecha,
+      id_sucursal: payload.id_sucursal,
+      detalles: detallesVenta,
+    });
     return true;
   } catch (error) {
     console.error(
@@ -447,6 +460,7 @@ async function connectToWhatsApp() {
 // y al mismo tiempo mantener el bot activo.
 
 const PORT = process.env.PORT || 3000;
+const SOCKET_PORT = process.env.SOCKET_PORT || 3001;
 
 const server = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
@@ -456,6 +470,23 @@ const server = http.createServer((req, res) => {
     res.writeHead(404, { "Content-Type": "text/plain" });
     res.end("Not found");
   }
+});
+
+// --- SERVIDOR SOCKET.IO (puerto separado para el frontend) ---
+const socketServer = http.createServer();
+const io = new Server(socketServer, {
+  cors: { origin: "*", methods: ["GET", "POST"] },
+});
+
+io.on("connection", (socket) => {
+  console.log(`🔌 Frontend conectado vía Socket.io: ${socket.id}`);
+  socket.on("disconnect", () =>
+    console.log(`🔌 Frontend desconectado: ${socket.id}`),
+  );
+});
+
+socketServer.listen(SOCKET_PORT, () => {
+  console.log(`📡 Socket.io escuchando en puerto ${SOCKET_PORT}`);
 });
 
 // Capturar errores no manejados para ver qué está crasheando
