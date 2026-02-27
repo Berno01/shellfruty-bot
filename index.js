@@ -5,6 +5,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   Browsers,
+  fetchLatestBaileysVersion,
 } = require("@whiskeysockets/baileys");
 const { Boom } = require("@hapi/boom");
 const qrcode = require("qrcode-terminal");
@@ -209,12 +210,24 @@ async function connectToWhatsApp() {
     return;
   }
 
+  let waVersion;
+  try {
+    const { version } = await fetchLatestBaileysVersion();
+    waVersion = version;
+    console.log(`📲 Usando WhatsApp Web v${version.join('.')}`);
+  } catch {
+    waVersion = [2, 3000, 1015901307]; // fallback conocido
+    console.warn("⚠️ No se pudo obtener versión WA, usando fallback.");
+  }
+
   const sock = makeWASocket({
+    version: waVersion,
     auth: state,
     logger: pino({ level: "silent" }),
     browser: Browsers.ubuntu("Chrome"),
-    connectTimeoutMs: 30000,
+    connectTimeoutMs: 60000,
     defaultQueryTimeoutMs: 60000,
+    printQRInTerminal: false,
   });
 
   sock.ev.on("connection.update", (update) => {
