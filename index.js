@@ -340,13 +340,19 @@ async function connectToWhatsApp() {
       };
     }
 
-    // --- Pedido ya finalizado: ignorar mensajes ---
-    if (sesiones[sender].pedidoFinalizado) return;
+    // --- Pedido ya finalizado: ignorar mensajes por 30 minutos ---
+    if (sesiones[sender].pedidoFinalizado) {
+      const elapsed = Date.now() - sesiones[sender].pedidoFinalizado;
+      const SILENCIO_MS = 30 * 60 * 1000; // 30 minutos
+      if (elapsed < SILENCIO_MS) return;
+      // Pasó el tiempo: resetear sesión para que pueda volver a pedir
+      sesiones[sender] = { historial: [], carrito: { items: [] }, saludado: true };
+    }
 
     // --- Esperando ubicación post-pedido ---
     if (sesiones[sender].esperandoUbicacion) {
       sesiones[sender].esperandoUbicacion = false;
-      sesiones[sender].pedidoFinalizado = true;
+      sesiones[sender].pedidoFinalizado = Date.now(); // timestamp para expiración
       await sock.sendMessage(sender, {
         text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
       });
