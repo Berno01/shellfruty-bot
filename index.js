@@ -51,6 +51,13 @@ const MODELOS = [
   "gemini-2.5-flash-lite",
 ];
 
+// --- TAKEOVER POR OPERADOR ---
+const PREFIJO_PEDIDO = "!pedido";            // cámbialo si querés otro prefijo
+const TAKEOVER_MS = 30 * 60 * 1000;           // 30 min: bot silenciado tras mensaje del operador
+const TAKEOVER_BIENVENIDA_MS = 45 * 60 * 1000; // 45 min: pasado este tiempo vuelve a dar bienvenida
+const operadorActivo = {};       // { clienteJid: timestamp } — cuándo tomó control el operador
+const botMensajesRecientes = {}; // { clienteJid: timestamp } — para distinguir mensajes del bot vs operador
+
 // --- FUNCIONES DE SOPORTE ---
 
 async function cargarCatalogo() {
@@ -164,6 +171,81 @@ async function enviarPedidoALaravel(sender) {
       error.response?.data || error.message,
     );
     return false;
+  }
+}
+
+// Interpreta un pedido en lenguaje natural escrito por el operador y lo registra en Laravel
+async function interpretarPedidoManual(clienteJid, descripcion, sock) {
+  if (!CATALOGO_CACHE) await cargarCatalogo();
+  console.log(`👤 Operador registrando pedido manual para ${clienteJid}: "${descripcion}"`);
+
+  for (const nombreModelo of MODELOS) {
+    try {
+      const genModel = genAI.getGenerativeModel({
+        model: nombreModelo,
+        systemInstruction: `Eres un intérprete de pedidos para Shellfruty. Convertís texto en lenguaje natural a un JSON de carrito.
+
+=== CATÁLOGO CON IDs ===
+${JSON.stringify(CATALOGO_CACHE)}
+
+=== INSTRUCCIONES ===
+- Analizá el texto y mapeá cada producto a su id_menu correcto según nombre y precio.
+- Para personalizaciones, usá los id_ingrediente exactos del catálogo.
+- Si un ingrediente no existe en el menú, ignoralo.
+- Responde ÚNICAMENTE con el JSON, sin texto adicional, sin markdown, sin explicaciones.
+
+Formato requerido:
+{"items": [{"id_menu": ID, "cantidad": N, "personalizaciones": [{"id_ingrediente": ID, "cantidad": 1}]}]}
+
+Si no podés mapear el pedido, responde:
+{"error": "descripción del problema"}`,
+      });
+
+      const result = await genModel.generateContent(descripcion);
+      const respuesta = result.response.text().trim()
+        .replace(/```json/g, "").replace(/```/g, "").trim();
+
+      const dataJson = JSON.parse(respuesta);
+
+      if (dataJson.error) {
+        console.error(`❌ Gemini no pudo mapear el pedido: ${dataJson.error}`);
+        botMensajesRecientes[clienteJid] = Date.now();
+        await sock.sendMessage(clienteJid, {
+          text: `❌ No pude interpretar el pedido: ${dataJson.error}\nIntentá con más detalle.`,
+        });
+        return;
+      }
+
+      // Preparar sesión del cliente con el carrito
+      if (!sesiones[clienteJid]) {
+        sesiones[clienteJid] = { historial: [], carrito: { items: [] }, saludado: true };
+      }
+      sesiones[clienteJid].carrito.items = dataJson.items;
+
+      const exito = await enviarPedidoALaravel(clienteJid);
+      if (exito) {
+        // Extender takeover 30 min más para que el bot no interfiera tras el pedido
+        operadorActivo[clienteJid] = Date.now();
+        console.log(`✅ Pedido manual registrado. Takeover extendido 30 min para ${clienteJid}`);
+      } else {
+        botMensajesRecientes[clienteJid] = Date.now();
+        await sock.sendMessage(clienteJid, {
+          text: `❌ Error al registrar el pedido en el sistema. Revisá los logs.`,
+        });
+      }
+      return;
+    } catch (error) {
+      if (error.message.includes("429") || error.message.includes("quota")) {
+        console.warn(`⚠️ Modelo ${nombreModelo} agotado en pedido manual, probando siguiente...`);
+        continue;
+      }
+      console.error("❌ Error en interpretarPedidoManual:", error.message);
+      botMensajesRecientes[clienteJid] = Date.now();
+      await sock.sendMessage(clienteJid, {
+        text: `❌ Error procesando el pedido. Intentá de nuevo.`,
+      });
+      return;
+    }
   }
 }
 
@@ -323,9 +405,32 @@ async function connectToWhatsApp() {
 
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
     const sender = msg.key.remoteJid;
+
+    // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
+    if (msg.key.fromMe) {
+      const ahora = Date.now();
+      const esMsgDelBot =
+        botMensajesRecientes[sender] &&
+        ahora - botMensajesRecientes[sender] < 8000;
+      if (!esMsgDelBot) {
+        // El operador escribió manualmente en este chat
+        const textoOperador =
+          msg.message.conversation ||
+          msg.message.extendedTextMessage?.text ||
+          "";
+        operadorActivo[sender] = ahora;
+        console.log(`👤 Operador activo en chat ${sender}`);
+        if (textoOperador.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
+          const descripcion = textoOperador.slice(PREFIJO_PEDIDO.length).trim();
+          if (descripcion) await interpretarPedidoManual(sender, descripcion, sock);
+        }
+      }
+      return;
+    }
+
     const text =
       msg.message.conversation || msg.message.extendedTextMessage?.text;
     const esUbicacion = !!msg.message.locationMessage;
@@ -338,6 +443,21 @@ async function connectToWhatsApp() {
         carrito: { items: [] },
         saludado: false,
       };
+    }
+
+    // --- Takeover por operador: bot silenciado mientras el personal atiende ---
+    if (operadorActivo[sender]) {
+      const elapsed = Date.now() - operadorActivo[sender];
+      if (elapsed < TAKEOVER_MS) return; // aún dentro del takeover, ignorar
+      // Takeover expiró
+      if (elapsed >= TAKEOVER_BIENVENIDA_MS) {
+        // Más de 45 min: resetear para dar bienvenida de nuevo
+        sesiones[sender] = { historial: [], carrito: { items: [] }, saludado: false };
+      } else {
+        // Entre 30-45 min: retomar silenciosamente sin bienvenida
+        if (sesiones[sender]) sesiones[sender].saludado = true;
+      }
+      delete operadorActivo[sender];
     }
 
     // --- Pedido ya finalizado: ignorar mensajes por 30 minutos ---
@@ -353,6 +473,7 @@ async function connectToWhatsApp() {
     if (sesiones[sender].esperandoUbicacion) {
       sesiones[sender].esperandoUbicacion = false;
       sesiones[sender].pedidoFinalizado = Date.now(); // timestamp para expiración
+      botMensajesRecientes[sender] = Date.now();
       await sock.sendMessage(sender, {
         text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
       });
@@ -371,8 +492,10 @@ async function connectToWhatsApp() {
         "🍓 *Frutas*\n\n" +
         "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
       try {
+        botMensajesRecientes[sender] = Date.now();
         await sock.sendMessage(sender, { text: bienvenida });
         // Enviar imagen del menú sin caption
+        botMensajesRecientes[sender] = Date.now();
         await sock.sendMessage(sender, {
           image: { url: "./menu_imgs/menu1.jpg" },
         });
@@ -425,6 +548,7 @@ async function connectToWhatsApp() {
           .trim();
 
         // Enviar mensaje limpio al cliente
+        botMensajesRecientes[sender] = Date.now();
         await sock.sendMessage(sender, { text: textoParaCliente });
 
         // Procesar el JSON si se extrajo correctamente
