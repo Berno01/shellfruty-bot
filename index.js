@@ -37,13 +37,8 @@ const API_BASE_URL =
 
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
 
-const sesiones = {};
 let CATALOGO_CACHE = null;
 let MENUS_ARRAY = []; // Array normalizado de menús para búsquedas internas
-// --- Buffers y temporizadores para agrupar mensajes por usuario ---
-const buffers = {}; // { sender: [mensajes] }
-const timers = {}; // { sender: timeoutId }
-const BUFFER_TIMEOUT_MS = 12000; // 10 segundos
 
 const MODELOS = [
   "gemini-2.5-flash",
@@ -51,31 +46,27 @@ const MODELOS = [
   "gemini-2.0-flash",
 ];
 
-// --- NÚMEROS QUE EL BOT DEBE IGNORAR COMPLETAMENTE ---
-// Agregar solo los dígitos sin el + ni código de país completo si querés,
-// o el número completo como aparece en el JID de WhatsApp (sin +, sin espacios)
+// --- NÚMEROS QUE EL BOT DEBE IGNORAR COMPLETAMENTE (sin +, sin espacios) ---
 const NUMEROS_IGNORADOS = new Set([
   "59175143385", // personal de delivery — no atender por bot
 ]);
 
-// --- TAKEOVER POR OPERADOR ---
-const PREFIJO_PEDIDO = "!pedido";             // cambialo si querés otro prefijo
-const TAKEOVER_MS = 30 * 60 * 1000;            // 30 min de silencio tras mensaje del operador
-const TAKEOVER_BIENVENIDA_MS = 45 * 60 * 1000; // más de 45 min: vuelve a dar bienvenida
-const operadorActivo = {};  // { jid: timestamp } — cuándo tomó control el operador
-const botJidsActivos = new Set(); // JIDs normalizados donde el bot acaba de enviar
+// Prefijo para que el operador registre ventas manualmente
+const PREFIJO_PEDIDO = "!pedido"; // cambialo si querés otro prefijo
+
+// Contactos a los que ya se les envió el mensaje de bienvenida
+const contactosBienvenidos = new Set();
+
+// Sesiones: solo se usan para guardar el carrito durante !pedido
+const sesiones = {};
 
 // Quita el sufijo @s.whatsapp.net / @lid / @g.us para comparaciones
 function normJid(jid) {
   return jid ? jid.replace(/@.*$/, "") : "";
 }
 
-// Wrapper de sock.sendMessage que registra el JID como "enviado por el bot"
-// para que el handler fromMe no lo confunda con mensaje del operador
+// Wrapper de sock.sendMessage
 async function botSend(sock, jid, content) {
-  const n = normJid(jid);
-  botJidsActivos.add(n);
-  setTimeout(() => botJidsActivos.delete(n), 12000);
   return sock.sendMessage(jid, content);
 }
 
@@ -158,13 +149,13 @@ async function enviarPedidoALaravel(sender) {
     .filter((d) => d !== null);
 
   const payload = {
-    id_usuario: 3,
+    id_usuario: 5,
     fecha: new Date().toISOString().split("T")[0],
     id_sucursal: SUCURSAL_ID,
-    monto_efectivo: 0.0,
+    monto_efectivo: 0,
     monto_qr: totalVenta,
     total: totalVenta,
-    estado: "PENDIENTE",
+    estado: "ENTREGADO",
     detalles: detallesVenta,
   };
 
@@ -228,113 +219,32 @@ Si no podés mapear el pedido respondé:
       const dataJson = JSON.parse(respuesta);
 
       if (dataJson.error) {
-        await botSend(sock, clienteJid, { text: `❌ No pude interpretar el pedido: ${dataJson.error}` });
+        console.error(`❌ Gemini no pudo interpretar el pedido: ${dataJson.error}`);
         return;
       }
 
       if (!sesiones[clienteJid])
-        sesiones[clienteJid] = { historial: [], carrito: { items: [] }, saludado: true };
+        sesiones[clienteJid] = { carrito: { items: [] } };
       sesiones[clienteJid].carrito.items = dataJson.items;
 
       const exito = await enviarPedidoALaravel(clienteJid);
       if (exito) {
-        operadorActivo[clienteJid] = Date.now(); // extiende takeover 30 min más
-        console.log(`✅ Pedido manual registrado para ${clienteJid}. Takeover extendido.`);
+        console.log(`✅ Pedido registrado para ${clienteJid}.`);
       } else {
-        await botSend(sock, clienteJid, { text: `❌ Error al registrar el pedido en el sistema.` });
+        console.error(`❌ Falló el registro en Laravel para ${clienteJid}.`);
       }
       return;
     } catch (error) {
       if (error.message.includes("429") || error.message.includes("quota") ||
           error.message.includes("503") || error.message.includes("Service Unavailable")) {
-        console.warn(`⚠️ Modelo ${nombreModelo} no disponible en pedido manual, probando siguiente...`);
+        console.warn(`⚠️ Modelo ${nombreModelo} no disponible, probando siguiente...`);
         continue;
       }
       console.error("❌ Error en interpretarPedidoManual:", error.message);
-      await botSend(sock, clienteJid, { text: `❌ Error procesando el pedido. Intentá de nuevo.` });
       return;
     }
   }
-}
-
-async function llamarIA(sender, mensajeCliente) {
-  if (!CATALOGO_CACHE) await cargarCatalogo();
-  if (!sesiones[sender]) {
-    sesiones[sender] = { historial: [], carrito: { items: [] } };
-  }
-
-  for (const nombreModelo of MODELOS) {
-    try {
-      const genModel = genAI.getGenerativeModel({
-        model: nombreModelo,
-        systemInstruction: `Eres el recepcionista de Shellfruty, tienda de Fresas con Crema en Tarija. Trato amable, chapaco, directo. Sin relleno ni texto de más.
-
-=== CATÁLOGO COMPLETO CON REGLAS ===
-${JSON.stringify(CATALOGO_CACHE)}
-
-=== CÓMO INTERPRETAR LAS REGLAS DE CADA MENÚ ===
-Cada menú tiene un array "reglas". Cada regla es una CATEGORÍA (ej: Cobertura, Crema, Topping, Fruta).
-- "gratis": cuántos ingredientes puede elegir sin costo extra.
-- "precio_extra_regla": costo fijo si elige más que "gratis" (solo cuando permite_combinar: false).
-- "permite_combinar: true": puede mezclar varios, solo ahi nos olvidamos del costo extra.
-- "permite_combinar: false": solo puede elegir hasta "gratis" en total; si quiere más paga "precio_extra_regla".
-- "extra" del ingrediente: costo adicional de ese ingrediente específico.
-
-=== REGLA DE ORO — PERSONALIZACIÓN OBLIGATORIA ===
-Cuando el cliente pide un menú que tiene categorías con MÁS DE UN ingrediente disponible, DEBES preguntar cuál elige ANTES de agregar al carrito. NO puedes asumir ni saltar esa pregunta.
-Ejemplo: Vaso Pequeño tiene categoría Cobertura con 2 opciones → OBLIGATORIO preguntar cuál cobertura quiere.
-ÚNICA EXCEPCIÓN: Si la categoría tiene exactamente 1 ingrediente, se asume ese sin preguntar.
-Si el menú tiene reglas vacías (reglas: []), se puede agregar directo sin preguntar nada.
-
-=== LÍMITES ESTRICTOS ===
-1. NUNCA ofrezcas ingredientes que no existan en las reglas del menú elegido.
-2. Si permite_combinar es false, el cliente NO puede elegir más de "gratis" ingredientes de esa categoría.
-3. Si permite_combinar es true, puede combinar.
-4. SIEMPRE informa el precio total actualizado cuando cambies algo.
-5. MONEDA: Bs.
-6. CANTIDAD EXACTA OBLIGATORIA: Si una categoría tiene "gratis": N, el cliente DEBE elegir EXACTAMENTE N ingredientes. Si elige menos, NO avances. Pregúntale que complete los restantes: puede elegir otro diferente o repetir uno ya elegido (doble). Ejemplo: gratis: 3 y elige 2 → "Te falta 1 topping, ¿cuál más querés o repetimos alguno en doble?".
-
-=== FLUJO OBLIGATORIO ===
-1. Cliente pide un menú → revisa sus reglas inmediatamente.
-2. Si tiene categorías con múltiples opciones → pregunta cuál elige (puedes agrupar las preguntas).
-3. Con TODAS las categorías completadas → muestra resumen con precio y pide confirmación.
-4. Cliente confirma → envía [DATA] con finalizado: true.
-
-=== FORMATO DEL CARRITO (REGLAS ESTRICTAS) ===
-1. NUNCA uses markdown ni bloques de código.
-2. SIEMPRE incluye el carrito completo al final de CADA respuesta con este tag exacto:
-[DATA:{"items": [{"id_menu": ID, "cantidad": N, "personalizaciones": [{"id_ingrediente": ID, "cantidad": 1}]}], "finalizado": false}]
-3. Cuando el cliente confirme definitivamente cambia a "finalizado": true.
-4. Si el carrito está vacío igual incluye: [DATA:{"items": [], "finalizado": false}]
-5. El tag [DATA:...] va SIEMPRE al final, sin texto después.`,
-      });
-
-      const chat = genModel.startChat({ history: sesiones[sender].historial });
-      const result = await chat.sendMessage(mensajeCliente);
-      const respuestaTexto = result.response.text();
-
-      sesiones[sender].historial.push({
-        role: "user",
-        parts: [{ text: mensajeCliente }],
-      });
-      sesiones[sender].historial.push({
-        role: "model",
-        parts: [{ text: respuestaTexto }],
-      });
-      if (sesiones[sender].historial.length > 10)
-        sesiones[sender].historial.splice(0, 2);
-
-      return respuestaTexto;
-    } catch (error) {
-      if (error.message.includes("429") || error.message.includes("quota") || error.message.includes("503") || error.message.includes("Service Unavailable")) {
-        console.warn(
-          `⚠️ Modelo ${nombreModelo} agotado, probando el siguiente...`,
-        );
-        continue;
-      }
-      throw error;
-    }
-  }
+  console.error("❌ Todos los modelos de Gemini fallaron para el pedido manual.");
 }
 
 async function connectToWhatsApp() {
@@ -412,7 +322,7 @@ async function connectToWhatsApp() {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("messages.upsert", async (m) => {
-    if (m.type !== "notify") return; // ignorar mensajes históricos del sync inicial
+    if (m.type !== "notify") return; // ignorar sync inicial
 
     const msg = m.messages[0];
     if (!msg.message) return;
@@ -422,177 +332,36 @@ async function connectToWhatsApp() {
     if (Date.now() - msgTimestamp > 2 * 60 * 1000) return;
 
     const sender = msg.key.remoteJid;
-    const esGrupo = sender?.endsWith("@g.us");
-    const textoDebug = msg.message.conversation || msg.message.extendedTextMessage?.text || "(no texto)";
-    console.log(`📩 Mensaje recibido | fromMe:${msg.key.fromMe} | grupo:${esGrupo} | de:${sender} | texto:"${textoDebug.substring(0,50)}"`);
+    if (sender?.endsWith("@g.us")) return;    // ignorar grupos
+    if (sender === "status@broadcast") return; // ignorar estados
+    if (NUMEROS_IGNORADOS.has(normJid(sender))) return; // ignorar delivery
 
-    if (esGrupo) return; // ignorar mensajes de grupos
-    if (sender === "status@broadcast") return; // ignorar estados de WA
-    if (NUMEROS_IGNORADOS.has(normJid(sender))) return; // número en lista de ignorados (delivery, etc.)
+    const texto = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+    console.log(`📩 fromMe:${msg.key.fromMe} | de:${sender} | "${texto.substring(0, 60)}"`);
 
-    // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
+    // --- Mensajes enviados por el operador (fromMe) ---
     if (msg.key.fromMe) {
-      const textoOp = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-
-      // !pedido se procesa SIEMPRE, sin importar si el bot acaba de enviar
-      if (textoOp.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
-        const desc = textoOp.slice(PREFIJO_PEDIDO.length).trim();
-        console.log(`🛒 Comando !pedido detectado para ${sender}: "${desc}"`);
+      if (texto.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
+        const desc = texto.slice(PREFIJO_PEDIDO.length).trim();
+        console.log(`🛒 !pedido para ${sender}: "${desc}"`);
         if (desc) await interpretarPedidoManual(sender, desc, sock);
-        return;
       }
-
-      // Para mensajes normales: solo activar takeover si NO fue el bot quien envió
-      if (!botJidsActivos.has(normJid(sender))) {
-        operadorActivo[sender] = Date.now();
-        console.log(`👤 Operador activo en ${sender}`);
-      }
-      return;
+      return; // ignorar todos los demás mensajes del operador
     }
 
-    const text =
-      msg.message.conversation || msg.message.extendedTextMessage?.text;
-    const esUbicacion = !!msg.message.locationMessage;
-    if (!text && !esUbicacion) return;
-
-    // --- Bienvenida y control de sesión ---
-    if (!sesiones[sender]) {
-      sesiones[sender] = {
-        historial: [],
-        carrito: { items: [] },
-        saludado: false,
-      };
-    }
-
-    // --- Takeover por operador: bot silenciado mientras el personal atiende ---
-    if (operadorActivo[sender]) {
-      const elapsed = Date.now() - operadorActivo[sender];
-      if (elapsed < TAKEOVER_MS) return; // aún dentro del takeover
-      // Expiró:
-      if (elapsed >= TAKEOVER_BIENVENIDA_MS) {
-        sesiones[sender] = { historial: [], carrito: { items: [] }, saludado: false };
-      } else if (sesiones[sender]) {
-        sesiones[sender].saludado = true; // retoma sin bienvenida
-      }
-      delete operadorActivo[sender];
-    }
-
-    // --- Pedido ya finalizado: ignorar mensajes por 30 minutos ---
-    if (sesiones[sender].pedidoFinalizado) {
-      const elapsed = Date.now() - sesiones[sender].pedidoFinalizado;
-      const SILENCIO_MS = 30 * 60 * 1000; // 30 minutos
-      if (elapsed < SILENCIO_MS) return;
-      // Pasó el tiempo: resetear sesión para que pueda volver a pedir
-      sesiones[sender] = { historial: [], carrito: { items: [] }, saludado: true };
-    }
-
-    // --- Esperando ubicación post-pedido ---
-    if (sesiones[sender].esperandoUbicacion) {
-      sesiones[sender].esperandoUbicacion = false;
-      sesiones[sender].pedidoFinalizado = Date.now();
-      await botSend(sock, sender, {
-        text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
-      });
-      return;
-    }
-
-    if (!sesiones[sender].saludado) {
-      // Enviar bienvenida solo la primera vez
+    // --- Mensajes de clientes: solo enviar bienvenida la primera vez ---
+    if (!contactosBienvenidos.has(sender)) {
+      contactosBienvenidos.add(sender);
       const bienvenida =
-        "¡Hola Case! Bienvenido a Shellfruty 🍓\n\n" +
-        "Para hacer tu pedido, por favor envía:\n" +
-        "1️⃣ *Tamaño del vaso*\n" +
-        "🍫 *Cobertura*\n" +
-        "🍬 *Topping*\n" +
-        "🥛 *Tipo de crema*\n" +
-        "🍓 *Frutas*\n\n" +
-        "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
+        "¡Hola! Bienvenido a *Shellfruty* 🍓\n\n" +
+        "Gracias por contactarnos. En breve te atendemos.";
       try {
         await botSend(sock, sender, { text: bienvenida });
-        await botSend(sock, sender, { image: { url: "./menu_imgs/menu1.jpg" } });
       } catch (e) {
-        console.error("Error enviando bienvenida o imágenes:", e.message);
+        console.error("Error enviando bienvenida:", e.message);
       }
-      sesiones[sender].saludado = true;
-      return; // No llamamos a la IA en el primer mensaje
     }
-
-    // --- Buffer y temporizador por usuario ---
-    if (!buffers[sender]) buffers[sender] = [];
-    buffers[sender].push(text);
-
-    // Si ya hay un temporizador, lo reiniciamos
-    if (timers[sender]) {
-      clearTimeout(timers[sender]);
-    }
-
-    timers[sender] = setTimeout(async () => {
-      const mensajesAgrupados = buffers[sender].join("\n");
-      buffers[sender] = [];
-      delete timers[sender];
-
-      console.log(`🤖 Procesando buffer de ${sender}: "${mensajesAgrupados.substring(0,80)}"`);
-
-      try {
-        const aiResponse = await llamarIA(sender, mensajesAgrupados);
-
-        // --- NUEVA LÓGICA DE EXTRACCIÓN ROBUSTA ---
-        const tagInicio = "[DATA:";
-        let textoParaCliente = aiResponse;
-        let jsonExtraido = null;
-
-        if (aiResponse.includes(tagInicio)) {
-          const partes = aiResponse.split(tagInicio);
-          textoParaCliente = partes[0].trim(); // Todo lo que está antes del tag
-
-          // Intentamos capturar el contenido del tag hasta el último "]"
-          const resto = partes[1];
-          const finIndex = resto.lastIndexOf("]");
-          if (finIndex !== -1) {
-            jsonExtraido = resto.substring(0, finIndex).trim();
-          }
-        }
-
-        // Limpiamos cualquier residuo de markdown o tags que la IA haya puesto por error
-        textoParaCliente = textoParaCliente
-          .replace(/```json/g, "")
-          .replace(/```/g, "")
-          .replace(/\[DATA:.*\]/s, "")
-          .trim();
-
-        // Enviar mensaje limpio al cliente
-        await botSend(sock, sender, { text: textoParaCliente });
-
-        // Procesar el JSON si se extrajo correctamente
-        if (jsonExtraido) {
-          try {
-            const dataJson = JSON.parse(jsonExtraido);
-
-            if (dataJson.items) {
-              sesiones[sender].carrito.items = dataJson.items;
-            }
-
-            if (dataJson.finalizado === true) {
-              const exito = await enviarPedidoALaravel(sender);
-              if (exito) {
-                sesiones[sender].esperandoUbicacion = true;
-                await botSend(sock, sender, {
-                  text: "¡Perfecto Case! Tu pedido ya está en cocina 🍓\n\nUna cosita más: mandanos tu *ubicación en tiempo actual* para la entrega 📍",
-                });
-              }
-            }
-          } catch (e) {
-            console.error("❌ Error parseando JSON de la IA:", e.message);
-            console.log("JSON que falló:", jsonExtraido);
-          }
-        }
-      } catch (error) {
-        console.error("Error:", error);
-        await botSend(sock, sender, {
-          text: "Ay No, me dio un calambre en el sistema. ¿Me lo puedes repetir?",
-        });
-      }
-    }, BUFFER_TIMEOUT_MS);
+    // Resto de mensajes del cliente: ignorar silenciosamente
   });
 }
 
