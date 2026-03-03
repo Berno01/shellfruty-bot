@@ -56,7 +56,12 @@ const PREFIJO_PEDIDO = "!pedido";            // cámbialo si querés otro prefij
 const TAKEOVER_MS = 30 * 60 * 1000;           // 30 min: bot silenciado tras mensaje del operador
 const TAKEOVER_BIENVENIDA_MS = 45 * 60 * 1000; // 45 min: pasado este tiempo vuelve a dar bienvenida
 const operadorActivo = {};       // { clienteJid: timestamp } — cuándo tomó control el operador
-const botMensajesRecientes = {}; // { clienteJid: timestamp } — para distinguir mensajes del bot vs operador
+const botMensajesRecientes = {}; // { numero: timestamp } — para distinguir mensajes del bot vs operador
+
+// Normaliza JID a solo el número, sin importar @s.whatsapp.net, @lid, @g.us, etc.
+function normJid(jid) {
+  return jid ? jid.replace(/@.*$/, "") : "";
+}
 
 // --- FUNCIONES DE SOPORTE ---
 
@@ -413,8 +418,8 @@ async function connectToWhatsApp() {
     if (msg.key.fromMe) {
       const ahora = Date.now();
       const esMsgDelBot =
-        botMensajesRecientes[sender] &&
-        ahora - botMensajesRecientes[sender] < 8000;
+        botMensajesRecientes[normJid(sender)] &&
+        ahora - botMensajesRecientes[normJid(sender)] < 15000;
       if (!esMsgDelBot) {
         // El operador escribió manualmente en este chat
         const textoOperador =
@@ -472,8 +477,8 @@ async function connectToWhatsApp() {
     // --- Esperando ubicación post-pedido ---
     if (sesiones[sender].esperandoUbicacion) {
       sesiones[sender].esperandoUbicacion = false;
-      sesiones[sender].pedidoFinalizado = Date.now(); // timestamp para expiración
-      botMensajesRecientes[sender] = Date.now();
+      sesiones[sender].pedidoFinalizado = Date.now();
+      botMensajesRecientes[normJid(sender)] = Date.now();
       await sock.sendMessage(sender, {
         text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
       });
@@ -492,10 +497,10 @@ async function connectToWhatsApp() {
         "🍓 *Frutas*\n\n" +
         "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
       try {
-        botMensajesRecientes[sender] = Date.now();
+        botMensajesRecientes[normJid(sender)] = Date.now();
         await sock.sendMessage(sender, { text: bienvenida });
         // Enviar imagen del menú sin caption
-        botMensajesRecientes[sender] = Date.now();
+        botMensajesRecientes[normJid(sender)] = Date.now();
         await sock.sendMessage(sender, {
           image: { url: "./menu_imgs/menu1.jpg" },
         });
