@@ -51,6 +51,13 @@ const MODELOS = [
   "gemini-2.0-flash",
 ];
 
+// --- NÚMEROS QUE EL BOT DEBE IGNORAR COMPLETAMENTE ---
+// Agregar solo los dígitos sin el + ni código de país completo si querés,
+// o el número completo como aparece en el JID de WhatsApp (sin +, sin espacios)
+const NUMEROS_IGNORADOS = new Set([
+  "59175143385", // personal de delivery — no atender por bot
+]);
+
 // --- TAKEOVER POR OPERADOR ---
 const PREFIJO_PEDIDO = "!pedido";             // cambialo si querés otro prefijo
 const TAKEOVER_MS = 30 * 60 * 1000;            // 30 min de silencio tras mensaje del operador
@@ -421,6 +428,7 @@ async function connectToWhatsApp() {
 
     if (esGrupo) return; // ignorar mensajes de grupos
     if (sender === "status@broadcast") return; // ignorar estados de WA
+    if (NUMEROS_IGNORADOS.has(normJid(sender))) return; // número en lista de ignorados (delivery, etc.)
 
     // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
     if (msg.key.fromMe) {
