@@ -46,9 +46,9 @@ const timers = {}; // { sender: timeoutId }
 const BUFFER_TIMEOUT_MS = 12000; // 10 segundos
 
 const MODELOS = [
-  "gemini-3-flash-preview",
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
+  "gemini-2.0-flash",
 ];
 
 // --- FUNCIONES DE SOPORTE ---
@@ -237,7 +237,7 @@ Si el menú tiene reglas vacías (reglas: []), se puede agregar directo sin preg
 
       return respuestaTexto;
     } catch (error) {
-      if (error.message.includes("429") || error.message.includes("quota")) {
+      if (error.message.includes("429") || error.message.includes("quota") || error.message.includes("503") || error.message.includes("Service Unavailable")) {
         console.warn(
           `⚠️ Modelo ${nombreModelo} agotado, probando el siguiente...`,
         );
