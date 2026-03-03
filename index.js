@@ -432,15 +432,20 @@ async function connectToWhatsApp() {
 
     // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
     if (msg.key.fromMe) {
+      const textoOp = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+
+      // !pedido se procesa SIEMPRE, sin importar si el bot acaba de enviar
+      if (textoOp.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
+        const desc = textoOp.slice(PREFIJO_PEDIDO.length).trim();
+        console.log(`🛒 Comando !pedido detectado para ${sender}: "${desc}"`);
+        if (desc) await interpretarPedidoManual(sender, desc, sock);
+        return;
+      }
+
+      // Para mensajes normales: solo activar takeover si NO fue el bot quien envió
       if (!botJidsActivos.has(normJid(sender))) {
-        // No fue el bot: es el operador escribiendo manualmente
-        const textoOp = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
         operadorActivo[sender] = Date.now();
         console.log(`👤 Operador activo en ${sender}`);
-        if (textoOp.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
-          const desc = textoOp.slice(PREFIJO_PEDIDO.length).trim();
-          if (desc) await interpretarPedidoManual(sender, desc, sock);
-        }
       }
       return;
     }
