@@ -149,13 +149,13 @@ async function enviarPedidoALaravel(sender) {
     .filter((d) => d !== null);
 
   const payload = {
-    id_usuario: 5,
+    id_usuario: 3,
     fecha: new Date().toISOString().split("T")[0],
     id_sucursal: SUCURSAL_ID,
     monto_efectivo: 0,
     monto_qr: totalVenta,
     total: totalVenta,
-    estado: "ENTREGADO",
+    estado: "PENDIENTE",
     detalles: detallesVenta,
   };
 
@@ -342,9 +342,18 @@ async function connectToWhatsApp() {
     // --- Mensajes enviados por el operador (fromMe) ---
     if (msg.key.fromMe) {
       if (texto.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
-        const desc = texto.slice(PREFIJO_PEDIDO.length).trim();
+        let desc = texto.slice(PREFIJO_PEDIDO.length).trim();
+
+        // Si no hay texto después de !pedido, intentar tomar el mensaje citado
+        if (!desc) {
+          const ctxInfo = msg.message.extendedTextMessage?.contextInfo;
+          const quotedMsg = ctxInfo?.quotedMessage;
+          desc = quotedMsg?.conversation || quotedMsg?.extendedTextMessage?.text || "";
+        }
+
         console.log(`🛒 !pedido para ${sender}: "${desc}"`);
         if (desc) await interpretarPedidoManual(sender, desc, sock);
+        else console.warn("⚠️ !pedido sin descripción y sin mensaje citado.");
       }
       return; // ignorar todos los demás mensajes del operador
     }
@@ -353,10 +362,20 @@ async function connectToWhatsApp() {
     if (!contactosBienvenidos.has(sender)) {
       contactosBienvenidos.add(sender);
       const bienvenida =
-        "¡Hola! Bienvenido a *Shellfruty* 🍓\n\n" +
-        "Gracias por contactarnos. En breve te atendemos.";
+        "¡Hola Case! Bienvenido a Shellfruty 🍓\n\n" +
+        "Para hacer tu pedido, por favor envía:\n" +
+        "1️⃣ *Tamaño del vaso*\n" +
+        "🍫 *Cobertura*\n" +
+        "🍬 *Topping*\n" +
+        "🥛 *Tipo de crema*\n" +
+        "🍓 *Frutas*\n\n" +
+        "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
       try {
-        await botSend(sock, sender, { text: bienvenida });
+        await sock.sendMessage(sender, { text: bienvenida });
+        // Enviar imagen del menú sin caption
+        await sock.sendMessage(sender, {
+          image: { url: "./menu_imgs/menu1.jpg" },
+        });
       } catch (e) {
         console.error("Error enviando bienvenida:", e.message);
       }
