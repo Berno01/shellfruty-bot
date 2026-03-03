@@ -405,10 +405,22 @@ async function connectToWhatsApp() {
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("messages.upsert", async (m) => {
+    if (m.type !== "notify") return; // ignorar mensajes históricos del sync inicial
+
     const msg = m.messages[0];
     if (!msg.message) return;
 
+    // Ignorar mensajes de más de 2 minutos (replay al reconectar)
+    const msgTimestamp = (msg.messageTimestamp || 0) * 1000;
+    if (Date.now() - msgTimestamp > 2 * 60 * 1000) return;
+
     const sender = msg.key.remoteJid;
+    const esGrupo = sender?.endsWith("@g.us");
+    const textoDebug = msg.message.conversation || msg.message.extendedTextMessage?.text || "(no texto)";
+    console.log(`📩 Mensaje recibido | fromMe:${msg.key.fromMe} | grupo:${esGrupo} | de:${sender} | texto:"${textoDebug.substring(0,50)}"`);
+
+    if (esGrupo) return; // ignorar mensajes de grupos
+    if (sender === "status@broadcast") return; // ignorar estados de WA
 
     // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
     if (msg.key.fromMe) {
@@ -506,6 +518,8 @@ async function connectToWhatsApp() {
       buffers[sender] = [];
       delete timers[sender];
 
+      console.log(`🤖 Procesando buffer de ${sender}: "${mensajesAgrupados.substring(0,80)}"`);
+
       try {
         const aiResponse = await llamarIA(sender, mensajesAgrupados);
 
@@ -550,7 +564,7 @@ async function connectToWhatsApp() {
               if (exito) {
                 sesiones[sender].esperandoUbicacion = true;
                 await botSend(sock, sender, {
-                  text: "¡Perfecto Case! Tu pedido ya está en cocina 🍓\n\nUna cosita más: mandanos tu *ubicación en tiempo real* para la entrega 📍",
+                  text: "¡Perfecto Case! Tu pedido ya está en cocina 🍓\n\nUna cosita más: mandanos tu *ubicación en tiempo actual* para la entrega 📍",
                 });
               }
             }
