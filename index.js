@@ -51,6 +51,27 @@ const MODELOS = [
   "gemini-2.0-flash",
 ];
 
+// --- TAKEOVER POR OPERADOR ---
+const PREFIJO_PEDIDO = "!pedido";             // cambialo si querés otro prefijo
+const TAKEOVER_MS = 30 * 60 * 1000;            // 30 min de silencio tras mensaje del operador
+const TAKEOVER_BIENVENIDA_MS = 45 * 60 * 1000; // más de 45 min: vuelve a dar bienvenida
+const operadorActivo = {};  // { jid: timestamp } — cuándo tomó control el operador
+const botJidsActivos = new Set(); // JIDs normalizados donde el bot acaba de enviar
+
+// Quita el sufijo @s.whatsapp.net / @lid / @g.us para comparaciones
+function normJid(jid) {
+  return jid ? jid.replace(/@.*$/, "") : "";
+}
+
+// Wrapper de sock.sendMessage que registra el JID como "enviado por el bot"
+// para que el handler fromMe no lo confunda con mensaje del operador
+async function botSend(sock, jid, content) {
+  const n = normJid(jid);
+  botJidsActivos.add(n);
+  setTimeout(() => botJidsActivos.delete(n), 12000);
+  return sock.sendMessage(jid, content);
+}
+
 // --- FUNCIONES DE SOPORTE ---
 
 async function cargarCatalogo() {
@@ -168,6 +189,67 @@ async function enviarPedidoALaravel(sender) {
 }
 
 // Interpreta un pedido en lenguaje natural escrito por el operador y lo registra en Laravel
+async function interpretarPedidoManual(clienteJid, descripcion, sock) {
+  if (!CATALOGO_CACHE) await cargarCatalogo();
+  console.log(`👤 Pedido manual para ${clienteJid}: "${descripcion}"`);
+
+  for (const nombreModelo of MODELOS) {
+    try {
+      const genModel = genAI.getGenerativeModel({
+        model: nombreModelo,
+        systemInstruction: `Eres un intérprete de pedidos para Shellfruty. Convertís texto en lenguaje natural a JSON de carrito.
+
+=== CATÁLOGO CON IDs ===
+${JSON.stringify(CATALOGO_CACHE)}
+
+=== INSTRUCCIONES ===
+- Mapeá cada producto al id_menu correcto según nombre/precio.
+- Usá los id_ingrediente exactos del catálogo para personalizaciones.
+- Si un ingrediente no existe en el menú, ignorálo.
+- Respondé SOLO el JSON, sin texto, sin markdown.
+
+Formato requerido:
+{"items": [{"id_menu": ID, "cantidad": N, "personalizaciones": [{"id_ingrediente": ID, "cantidad": 1}]}]}
+
+Si no podés mapear el pedido respondé:
+{"error": "motivo"}`,
+      });
+
+      const result = await genModel.generateContent(descripcion);
+      const respuesta = result.response.text().trim()
+        .replace(/```json/g, "").replace(/```/g, "").trim();
+      const dataJson = JSON.parse(respuesta);
+
+      if (dataJson.error) {
+        await botSend(sock, clienteJid, { text: `❌ No pude interpretar el pedido: ${dataJson.error}` });
+        return;
+      }
+
+      if (!sesiones[clienteJid])
+        sesiones[clienteJid] = { historial: [], carrito: { items: [] }, saludado: true };
+      sesiones[clienteJid].carrito.items = dataJson.items;
+
+      const exito = await enviarPedidoALaravel(clienteJid);
+      if (exito) {
+        operadorActivo[clienteJid] = Date.now(); // extiende takeover 30 min más
+        console.log(`✅ Pedido manual registrado para ${clienteJid}. Takeover extendido.`);
+      } else {
+        await botSend(sock, clienteJid, { text: `❌ Error al registrar el pedido en el sistema.` });
+      }
+      return;
+    } catch (error) {
+      if (error.message.includes("429") || error.message.includes("quota") ||
+          error.message.includes("503") || error.message.includes("Service Unavailable")) {
+        console.warn(`⚠️ Modelo ${nombreModelo} no disponible en pedido manual, probando siguiente...`);
+        continue;
+      }
+      console.error("❌ Error en interpretarPedidoManual:", error.message);
+      await botSend(sock, clienteJid, { text: `❌ Error procesando el pedido. Intentá de nuevo.` });
+      return;
+    }
+  }
+}
+
 async function llamarIA(sender, mensajeCliente) {
   if (!CATALOGO_CACHE) await cargarCatalogo();
   if (!sesiones[sender]) {
@@ -324,9 +406,25 @@ async function connectToWhatsApp() {
 
   sock.ev.on("messages.upsert", async (m) => {
     const msg = m.messages[0];
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
     const sender = msg.key.remoteJid;
+
+    // --- Mensajes enviados desde este número (bot o el operador manualmente) ---
+    if (msg.key.fromMe) {
+      if (!botJidsActivos.has(normJid(sender))) {
+        // No fue el bot: es el operador escribiendo manualmente
+        const textoOp = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+        operadorActivo[sender] = Date.now();
+        console.log(`👤 Operador activo en ${sender}`);
+        if (textoOp.toLowerCase().startsWith(PREFIJO_PEDIDO.toLowerCase())) {
+          const desc = textoOp.slice(PREFIJO_PEDIDO.length).trim();
+          if (desc) await interpretarPedidoManual(sender, desc, sock);
+        }
+      }
+      return;
+    }
+
     const text =
       msg.message.conversation || msg.message.extendedTextMessage?.text;
     const esUbicacion = !!msg.message.locationMessage;
@@ -339,6 +437,19 @@ async function connectToWhatsApp() {
         carrito: { items: [] },
         saludado: false,
       };
+    }
+
+    // --- Takeover por operador: bot silenciado mientras el personal atiende ---
+    if (operadorActivo[sender]) {
+      const elapsed = Date.now() - operadorActivo[sender];
+      if (elapsed < TAKEOVER_MS) return; // aún dentro del takeover
+      // Expiró:
+      if (elapsed >= TAKEOVER_BIENVENIDA_MS) {
+        sesiones[sender] = { historial: [], carrito: { items: [] }, saludado: false };
+      } else if (sesiones[sender]) {
+        sesiones[sender].saludado = true; // retoma sin bienvenida
+      }
+      delete operadorActivo[sender];
     }
 
     // --- Pedido ya finalizado: ignorar mensajes por 30 minutos ---
@@ -354,7 +465,7 @@ async function connectToWhatsApp() {
     if (sesiones[sender].esperandoUbicacion) {
       sesiones[sender].esperandoUbicacion = false;
       sesiones[sender].pedidoFinalizado = Date.now();
-      await sock.sendMessage(sender, {
+      await botSend(sock, sender, {
         text: "¡Listo! Ya tenemos tu ubicación 📍\n\nEn breve te mandamos el QR para el pago. ¡Gracias por tu pedido en Shellfruty! 🍓",
       });
       return;
@@ -372,11 +483,8 @@ async function connectToWhatsApp() {
         "🍓 *Frutas*\n\n" +
         "📍 *Incluye tu ubicación en tiempo actual para la entrega*.";
       try {
-        await sock.sendMessage(sender, { text: bienvenida });
-        // Enviar imagen del menú sin caption
-        await sock.sendMessage(sender, {
-          image: { url: "./menu_imgs/menu1.jpg" },
-        });
+        await botSend(sock, sender, { text: bienvenida });
+        await botSend(sock, sender, { image: { url: "./menu_imgs/menu1.jpg" } });
       } catch (e) {
         console.error("Error enviando bienvenida o imágenes:", e.message);
       }
@@ -426,7 +534,7 @@ async function connectToWhatsApp() {
           .trim();
 
         // Enviar mensaje limpio al cliente
-        await sock.sendMessage(sender, { text: textoParaCliente });
+        await botSend(sock, sender, { text: textoParaCliente });
 
         // Procesar el JSON si se extrajo correctamente
         if (jsonExtraido) {
@@ -441,7 +549,7 @@ async function connectToWhatsApp() {
               const exito = await enviarPedidoALaravel(sender);
               if (exito) {
                 sesiones[sender].esperandoUbicacion = true;
-                await sock.sendMessage(sender, {
+                await botSend(sock, sender, {
                   text: "¡Perfecto Case! Tu pedido ya está en cocina 🍓\n\nUna cosita más: mandanos tu *ubicación en tiempo real* para la entrega 📍",
                 });
               }
@@ -453,7 +561,7 @@ async function connectToWhatsApp() {
         }
       } catch (error) {
         console.error("Error:", error);
-        await sock.sendMessage(sender, {
+        await botSend(sock, sender, {
           text: "Ay No, me dio un calambre en el sistema. ¿Me lo puedes repetir?",
         });
       }
