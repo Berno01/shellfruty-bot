@@ -214,12 +214,18 @@ Si no podés mapear el pedido respondé:
       });
 
       const result = await genModel.generateContent(descripcion);
-      const respuesta = result.response.text().trim()
-        .replace(/```json/g, "").replace(/```/g, "").trim();
+      const respuesta = result.response
+        .text()
+        .trim()
+        .replace(/```json/g, "")
+        .replace(/```/g, "")
+        .trim();
       const dataJson = JSON.parse(respuesta);
 
       if (dataJson.error) {
-        console.error(`❌ Gemini no pudo interpretar el pedido: ${dataJson.error}`);
+        console.error(
+          `❌ Gemini no pudo interpretar el pedido: ${dataJson.error}`,
+        );
         return;
       }
 
@@ -235,16 +241,24 @@ Si no podés mapear el pedido respondé:
       }
       return;
     } catch (error) {
-      if (error.message.includes("429") || error.message.includes("quota") ||
-          error.message.includes("503") || error.message.includes("Service Unavailable")) {
-        console.warn(`⚠️ Modelo ${nombreModelo} no disponible, probando siguiente...`);
+      if (
+        error.message.includes("429") ||
+        error.message.includes("quota") ||
+        error.message.includes("503") ||
+        error.message.includes("Service Unavailable")
+      ) {
+        console.warn(
+          `⚠️ Modelo ${nombreModelo} no disponible, probando siguiente...`,
+        );
         continue;
       }
       console.error("❌ Error en interpretarPedidoManual:", error.message);
       return;
     }
   }
-  console.error("❌ Todos los modelos de Gemini fallaron para el pedido manual.");
+  console.error(
+    "❌ Todos los modelos de Gemini fallaron para el pedido manual.",
+  );
 }
 
 async function connectToWhatsApp() {
@@ -332,12 +346,15 @@ async function connectToWhatsApp() {
     if (Date.now() - msgTimestamp > 2 * 60 * 1000) return;
 
     const sender = msg.key.remoteJid;
-    if (sender?.endsWith("@g.us")) return;    // ignorar grupos
+    if (sender?.endsWith("@g.us")) return; // ignorar grupos
     if (sender === "status@broadcast") return; // ignorar estados
     if (NUMEROS_IGNORADOS.has(normJid(sender))) return; // ignorar delivery
 
-    const texto = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-    console.log(`📩 fromMe:${msg.key.fromMe} | de:${sender} | "${texto.substring(0, 60)}"`);
+    const texto =
+      msg.message.conversation || msg.message.extendedTextMessage?.text || "";
+    console.log(
+      `📩 fromMe:${msg.key.fromMe} | de:${sender} | "${texto.substring(0, 60)}"`,
+    );
 
     // --- Mensajes enviados por el operador (fromMe) ---
     if (msg.key.fromMe) {
@@ -348,7 +365,10 @@ async function connectToWhatsApp() {
         if (!desc) {
           const ctxInfo = msg.message.extendedTextMessage?.contextInfo;
           const quotedMsg = ctxInfo?.quotedMessage;
-          desc = quotedMsg?.conversation || quotedMsg?.extendedTextMessage?.text || "";
+          desc =
+            quotedMsg?.conversation ||
+            quotedMsg?.extendedTextMessage?.text ||
+            "";
         }
 
         console.log(`🛒 !pedido para ${sender}: "${desc}"`);
